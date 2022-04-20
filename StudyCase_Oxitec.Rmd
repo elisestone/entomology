@@ -1,0 +1,218 @@
+---
+title: "Oxitec Case Study"
+author: "Elise A. Rocha"
+date: "08/03/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+**Study case questions and context**
+
+  * Context:
+ Understanding how the device performs in field conditions is crucial for estimating the success of the Oxitec insects that will be released in the environment. In this dummy database, we have temperature data collected inside each device as well as a performance assessment carried out after a certain time of exposure in the field. The performance metrics collected are quality of the device (where 0 means poor and 100 very good quality); Number of Healthy Insects (where 100 is the maximum); Group, that refers to the configuration of each device; Cost per Device (R$) is the individual cost of each single device. 
+In the coordinates tab, you can find each single box location when deployed in the field.
+
+  * Questions:
+1. Describe your thought process and steps taken to analyse the data
+2. Does the temperature affect the device performance?
+3. Does the amount of time spent in the field, affects the device development?
+4. What group of devices would you recommend for use? Please, explain
+5. Is there any spatial pattern related to the quality of the devices?
+6. We highly recommend that the candidate does not be restricted only to this database and is free to use other resources and examples to demonstrate advanced analytical concepts and techniques to produce solutions to complex problems
+
+**Data preprocessing**
+
+Steps: load datasets and import libraries; calculate total time spent in the field for each device; calculate mean temperature and humidity for each device; join tables; modify lat and long variables; standardize data;
+ 
+Step 1 - Loading datasets and libraries:  
+```{r Loading datasets, echo=TRUE, message=FALSE, warning=FALSE}
+
+library("readxl")
+temp <- read_xlsx('Data Scientist Task.xlsx', sheet ="temp") #temperature data
+features <- read_xlsx('Data Scientist Task.xlsx', sheet ="features") #feature data
+coord<- read_xlsx('Data Scientist Task.xlsx', sheet ="coord") #coordinates
+
+library("tidyverse")
+library("lubridate")
+library("dplyr")
+```
+
+Quick peek through data:
+```{r echo=TRUE}
+head(temp)
+```
+```{r echo=TRUE}
+head(features)
+```
+```{r echo=TRUE}
+head(coord)
+```
+
+Step 2 - Calculate time differences between measurements:
+```{r echo=TRUE}
+temp$Time <- strptime(temp$Time, 
+                      format = "%Y-%m-%d %H:%M:%S") #transforming date and time as posixt
+
+temp_diff <- temp %>% arrange(device_ID, Time) %>%
+              group_by(device_ID) %>%
+              mutate(diff_time = as.numeric(Time - lag(Time))) %>%
+              replace(is.na(.), 0) #calculating time differences between measurements
+head(temp_diff)
+
+```
+
+Step 3 -  Calculate mean temperature and humidity and total time spent in the field for each device:
+```{r}
+temp_group <- group_by(temp_diff, device_ID) #grouping the temp_diff data by device
+
+temp_group_descrip <- temp_group %>% summarise(
+mean_temperature = mean(temperature),
+mean_humidity = mean(humidity),
+sum_time = sum(diff_time)) 
+
+```
+
+Step 4 - Joining tables:
+
+```{r echo=TRUE}
+dataset_join<- full_join(features, coord, by= "device_ID")
+dataset_final<- full_join(dataset_join, 
+                          temp_group_descrip, 
+                          by= "device_ID") #joining tables to form the final dataset  
+head(dataset_final)
+```
+
+Step 5 - Modify latitude and longitude variables:
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library("measurements")
+
+dataset_final$Lat <- dataset_final$Latitude %>%
+  sub('°', ' ', .) %>%
+  sub("'", ' ', .) %>%
+  sub('"', ' ', .) %>%
+  sub('S', '', .)
+dataset_final$Long <- dataset_final$Longitude %>%
+  sub('°', ' ', .) %>%
+  sub("'", ' ', .) %>%
+  sub('"', ' ', .) %>%
+  sub('W', '', .)
+
+dataset_final$Lat <- conv_unit(dataset_final$Lat, from = "deg_min_sec", to = "dec_deg")
+dataset_final$Long <- conv_unit(dataset_final$Long, from = "deg_min_sec", to = "dec_deg")
+
+dataset_final$Lat <- as.numeric(dataset_final$Lat)*(-1) 
+dataset_final$Long <- as.numeric(dataset_final$Long)*(-1) 
+
+print(dataset_final[,11:12])
+
+```
+
+Step 6 - Standardize data:
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library("data.table")
+
+dataset_final$group <- as.factor(dataset_final$group) #transform to factor
+dataset_norm <- copy(dataset_final) #copy of the final dataset that will be scaled
+
+# quantitative columns to scale
+cols <- c("n_insects", 'cost_device', 'mean_temperature', 'mean_humidity', 'sum_time')
+
+# normalization function
+range01 <- function(x){(x-min(x, na.rm=TRUE))/(max(x, na.rm=TRUE)-min(x, na.rm=TRUE))}
+
+# applying the function
+dataset_norm[cols] <- lapply(dataset_norm[cols], range01)
+
+head(dataset_norm)
+```
+
+**Data analysis**
+
+Visualizing variables relationships:
+```{r echo=TRUE}
+dataset_final %>%
+  gather(-device_ID, -quality_device, -Latitude, -Longitude, -Lat, -Long, -group,
+         key = "var", value = "value") %>%
+  ggplot(aes(x = value, y = quality_device, color = group)) +
+  geom_point()+
+  facet_wrap(~ var, scales = 'free')+
+  theme_bw()
+```
+
+Visualizing the correlations between variables:
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library("corrplot")
+cols2 <- c("n_insects", 'quality_device', 'cost_device', 'mean_temperature', 
+           'mean_humidity', 'sum_time')
+dataset_corr<- cor(dataset_final[cols2], method = 'pearson') #correlation matrix
+
+corrplot(dataset_corr, 
+         method = "color",
+         sig.level = 0.05,
+         order = "original",
+         diag = FALSE,
+         addCoef.col = "black",
+         tl.col = "black",
+         type = "upper",
+         insig = "blank",
+         tl.srt = 75) #correlogram
+```
+
+
+GLM relating explanatory variables with device quality:
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library('stats')
+poisson_model1<- glm(quality_device ~ n_insects + group + mean_temperature 
+                     + mean_humidity + sum_time, 
+                     family = poisson(link = 'log'),
+                     data = dataset_norm)
+summary(poisson_model1)
+
+poisson_model2<- glm(quality_device ~ n_insects + cost_device + 
+                    mean_temperature + mean_humidity + sum_time, 
+                     family = poisson(link = 'log'),
+                     data = dataset_norm)
+summary(poisson_model2)
+
+poisson_model2.1<- glm(quality_device ~ n_insects + cost_device 
+                    + mean_temperature + sum_time, 
+                     family = poisson(link = 'log'),
+                     data = dataset_norm)
+summary(poisson_model2.1)
+
+poisson_model2.2<- glm(quality_device ~ n_insects + mean_temperature 
+                       +sum_time, 
+                       family = poisson(link = 'log'),
+                       data = dataset_norm)
+summary(poisson_model2.2) 
+
+poisson_model2.3<- glm(quality_device ~ n_insects + mean_temperature, 
+                       family = poisson(link = 'log'),
+                       data = dataset_norm)
+summary(poisson_model2.3) 
+
+```
+Checking the residuals of the final model:
+
+```{r echo=TRUE}
+par(mfrow = c(2,2))
+plot(poisson_model2.3)
+```
+
+Investigating if there is a spatial pattern related to device quality: 
+```{r echo=TRUE}
+#Calculating Moran's I measure of spatial autocorrelation
+
+library("ape")
+dist<- as.matrix(dist(cbind(dataset_final$Long, dataset_final$Lat)))
+dist_inv<- 1/dist #generating a matrix of inverse distance weights
+diag(dist_inv)<- 0
+
+Moran.I(dataset_final$quality_device, dist_inv) #no evidence of spatial autocorrelation
+```
+Final sugestions: survival analysis, wind speed.
